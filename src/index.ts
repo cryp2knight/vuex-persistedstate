@@ -8,9 +8,13 @@ interface Storage {
   removeItem: (key: string) => void;
 }
 
+interface PathOptions {
+  path: string;
+  storage: Storage;
+}
 interface Options<State> {
   key?: string;
-  paths?: string[];
+  paths?: (string | PathOptions)[];
   reducer?: (state: State, paths: string[]) => object;
   subscriber?: (
     store: Store<State>
@@ -55,11 +59,48 @@ export default function <State>(
   }
 
   function reducer(state, paths) {
+    const pathBuilder = (path) => {
+      if (typeof path === "string" || !path) {
+        return path;
+      }
+      return path.path;
+    };
     return Array.isArray(paths)
       ? paths.reduce(function (substate, path) {
+          path = pathBuilder(path);
           return shvl.set(substate, path, shvl.get(state, path));
         }, {})
       : state;
+  }
+
+  function getPathsGroup(paths) {
+    if (!paths) {
+      return paths;
+    }
+    const grouped = { strings: { paths: [], storage: undefined } };
+    const objs = [];
+
+    function getOrSetObjectKey(obj) {
+      const objIndex = objs.findIndex((o) => Object.is(obj, o));
+      if (objIndex > -1) {
+        return objIndex;
+      }
+      objs.push(obj);
+      return objs.length - 1;
+    }
+
+    for (const path of paths) {
+      if (typeof path === "string") {
+        grouped.strings.paths.push(path);
+      } else {
+        const index = getOrSetObjectKey(path.storage);
+        (grouped[index] = grouped[index] || {
+          storage: path.storage,
+          paths: [],
+        }).paths.push(path);
+      }
+    }
+    return Object.values(grouped);
   }
 
   function subscriber(store) {
@@ -77,7 +118,23 @@ export default function <State>(
 
   assertStorage(storage);
 
-  const fetchSavedState = () => (options.getState || getState)(key, storage);
+  const fetchSavedState = () => {
+    const paths = getPathsGroup(options.paths);
+    if (!paths) {
+      return (options.getState || getState)(key, storage);
+    }
+    return paths.reduce(
+      function (prev, cur) {
+        const state =
+          ((options.getState || getState)(key, cur.storage || storage) || {})[
+            key
+          ] || {};
+        prev[key] = { ...prev[key], ...state };
+        return prev;
+      },
+      { [key]: {} }
+    );
+  };
 
   let savedState;
 
@@ -108,11 +165,22 @@ export default function <State>(
 
     (options.subscriber || subscriber)(store)(function (mutation, state) {
       if ((options.filter || filter)(mutation)) {
-        (options.setState || setState)(
-          key,
-          (options.reducer || reducer)(state, options.paths),
-          storage
-        );
+        const paths = getPathsGroup(options.paths);
+        if (!paths) {
+          (options.setState || setState)(
+            key,
+            (options.reducer || reducer)(state, options.paths),
+            storage
+          );
+        } else {
+          for (const path of paths) {
+            (options.setState || setState)(
+              key,
+              (options.reducer || reducer)(state, path.paths),
+              path.storage || storage
+            );
+          }
+        }
       }
     });
   };
